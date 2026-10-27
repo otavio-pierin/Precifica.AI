@@ -1,427 +1,409 @@
-# Preço Justo — Módulo Back-end & IA
+# Precifica.AI
 
-Motor de precificação para trabalhadores autônomos (beleza, costura, artesanato, manutenção etc.). O usuário escreve em linguagem natural ("Cobro 60 reais na unha em gel, demoro 2 horas...") e o módulo devolve custos, sobra real, margem e preço mínimo, além de um texto pronto para exibir no chat.
+Assistente de precificação para trabalhadores autônomos. A pessoa conversa em linguagem natural ("cobro R$ 150, gasto R$ 21,50 de material e levo 2h30") e o assistente mostra quanto realmente sobra, quanto ela ganha por hora e qual é o preço mínimo para não ter prejuízo ou para atingir uma meta.
 
-**Princípio central:** a IA (Google Gemini) **só extrai dados** do texto. **Toda a matemática é feita em Python**, de forma determinística, com `Decimal` e arredondamento em centavos. A IA nunca faz contas.
+**Demonstração online:** https://precifica-ai.onrender.com
+
+**Princípio central:** a IA (Google Gemini) **só interpreta o texto** e devolve os dados em JSON. **Todas as contas são feitas em Python**, de forma determinística e com precisão decimal. A IA nunca calcula.
 
 ---
 
 ## Sumário
 
-1. [Instalação e configuração](#1-instalação-e-configuração)
-2. [Como o código funciona](#2-como-o-código-funciona)
-3. [Fórmulas financeiras](#3-fórmulas-financeiras)
-4. [Saída da função principal](#4-saída-da-função-principal)
-5. [Como tratar no front-end](#5-como-tratar-no-front-end)
-6. [Resiliência da chamada à IA](#6-resiliência-da-chamada-à-ia)
-7. [Testes](#7-testes)
-8. [Limitações conhecidas](#8-limitações-conhecidas)
+1. [Funcionalidades](#1-funcionalidades)
+2. [Como funciona](#2-como-funciona)
+3. [Regras de cálculo](#3-regras-de-cálculo)
+4. [Estrutura do projeto](#4-estrutura-do-projeto)
+5. [Instalação e execução local](#5-instalação-e-execução-local)
+6. [Configuração (.env)](#6-configuração-env)
+7. [API HTTP](#7-api-http)
+8. [Saída do motor (`engine.py`)](#8-saída-do-motor-enginepy)
+9. [Front-end](#9-front-end)
+10. [Testes pelo terminal](#10-testes-pelo-terminal)
+11. [Deploy no Render](#11-deploy-no-render)
+12. [Limites da API e solução de problemas](#12-limites-da-api-e-solução-de-problemas)
+13. [Uso responsável da IA](#13-uso-responsável-da-ia)
+14. [Limitações conhecidas](#14-limitações-conhecidas)
 
 ---
 
-## 1. Instalação e configuração
+## 1. Funcionalidades
+
+- **Conversa em linguagem natural:** entende formatos como "mil e duzentos", "1.200,50", "1h30 + 30 min de preparo" e "rende uns 40 atendimentos".
+- **Dois modelos de cobrança:** por serviço (maquiagem, manicure, costura, artesanato...) e recorrente (plano mensal, assinatura, aulas, hospedagem).
+- **Resultado em linguagem simples:** custos detalhados, sobra, valor por hora real e preço mínimo.
+- **Meta opcional:** com "quero ganhar R$ 50 por hora" ou "quero ganhar R$ 5.000 por mês", o assistente calcula o preço para atingir a meta.
+- **Simulações:** "E se eu cobrar R$ 60?" compara os dois cenários lado a lado, com a taxa recalculada. No modelo recorrente, também "E se eu tiver 20 clientes?".
+- **Embalagens e rendimento:** "caixa com 10 pares por R$ 35, uso 1 por cliente" vira R$ 3,50 por atendimento.
+- **Custos mensais rateados:** aluguel, imposto, agenda e outros gastos fixos são divididos pelos atendimentos ou clientes do mês.
+- **Confirmação antes de calcular:** o assistente mostra os dados que entendeu e só calcula após o "sim".
+- **Correções no meio da conversa:** "na verdade a base rende só 30" recalcula tudo.
+- **Validação de entradas:** valores negativos, tempo zero e preço zero são recusados com uma pergunta, e o assistente pergunta o que falta em vez de inventar.
+- **Estimativas sinalizadas:** valores aproximados ("uns R$ 40") aparecem como "(estimativa sua)".
+
+---
+
+## 2. Como funciona
+
+```
+Mensagem do usuário
+   │
+   ▼
+extrair_dados_com_ia()      Gemini: texto → JSON (nunca calcula)
+   │
+   ▼
+normalizar_extracao()       Python: valida tipos, recusa negativos/zeros, soma tempos em partes
+   │
+   ▼
+atualizar_estado()          Python: mescla com o que já foi dito na conversa
+   │
+   ├─ falta dado essencial ──────► pergunta o que falta
+   ├─ dados completos (1ª vez) ──► mostra o resumo e pede confirmação
+   └─ confirmado ────────────────► calcula (por serviço ou recorrente) e explica
+```
+
+### Fluxo típico de conversa
+
+1. **Pessoa:** "Faço maquiagem social e cobro R$ 150."
+2. **Assistente:** registra o preço e pergunta tempo (com preparo e limpeza), materiais, deslocamento e forma de pagamento.
+3. **Pessoa:** responde, em uma ou várias mensagens.
+4. **Assistente:** mostra o resumo dos dados e pergunta "Está tudo certo?".
+5. **Pessoa:** "sim". Esse "sim" é reconhecido sem chamar a IA.
+6. **Assistente:** mostra o resultado:
+
+```
+Resumo do seu serviço (Maquiagem social):
+- Descartáveis: R$ 3,50
+- Produtos: R$ 10,00
+- Cílios: R$ 8,00
+- Total de materiais: R$ 21,50
+- Deslocamento: R$ 24,00
+- Taxa do cartão (3,5% de R$ 150,00): R$ 5,25
+- Total de custos: R$ 50,75
+
+Cobrando R$ 150,00:
+- Sobra para você: R$ 99,25
+- Valor por hora: R$ 39,70 (2,5h de trabalho, contando preparo e limpeza)
+
+💡 Preço mínimo: R$ 47,15. Abaixo disso você não cobre nem os custos.
+```
+
+### Intenções reconhecidas
+
+| Intenção | Exemplo | O que acontece |
+|---|---|---|
+| `informar_dados` | "Gasto R$ 15 de material" | Adiciona os dados à conversa |
+| `corrigir_dado` | "Na verdade o tecido custou R$ 35" | Altera só o item citado |
+| `simular_preco` | "E se eu cobrar R$ 90?" | Compara os cenários, sem alterar o preço salvo |
+| `confirmar` | "Sim, pode calcular" | Libera o cálculo |
+
+### Dados obrigatórios
+
+O assistente não calcula enquanto faltar um destes dados:
+
+| Modelo | Obrigatórios | Perguntados, mas não bloqueiam |
+|---|---|---|
+| Por serviço | preço, tempo, materiais, deslocamento e quanto rende cada embalagem citada | forma de pagamento |
+| Recorrente | nº de clientes, preço (ou meta de renda), custos mensais e nº de encontros (se houver custo por encontro) | forma de pagamento e material por cliente |
+
+"Não tenho deslocamento", "não gasto material" e "nenhum gasto mensal" contam como respostas válidas, com valor zero. Se a forma de pagamento não for informada, o cálculo usa **5% de taxa de cartão** e **avisa isso na resposta**.
+
+---
+
+## 3. Regras de cálculo
+
+Todas as contas usam `Decimal`, com arredondamento em centavos (`ROUND_HALF_UP`).
+
+### Por serviço
+
+| Item | Fórmula |
+|---|---|
+| Material por atendimento | `preço da embalagem ÷ rendimento × quantidade usada` |
+| Custos mensais rateados | `custos fixos do mês ÷ atendimentos por mês` |
+| Taxa | `preço × taxa (%)`, recalculada quando o preço muda |
+| **Total de custos** | `materiais + deslocamento + outros + rateio + taxa` |
+| **Sobra** | `preço − total de custos` |
+| **Valor por hora** | `sobra ÷ horas (atendimento + preparo + limpeza)` |
+| Preço mínimo, sem meta | `custos sem taxa ÷ (1 − taxa)` |
+| Preço mínimo, com meta | `(custos sem taxa + horas × meta por hora) ÷ (1 − taxa)` |
+
+### Recorrente (base mensal)
+
+| Item | Fórmula |
+|---|---|
+| Conversão de períodos | anual ÷ 12, semanal × 52/12, diário × 30 e gasto único diluído em 12 meses |
+| Horas "por dia" | × 22 dias de trabalho (configurável) |
+| Material por cliente | custo por cliente/mês, ou custo por encontro × encontros por mês |
+| Rateio por cliente | `custos fixos do mês ÷ clientes` |
+| **Sobra por cliente** | `preço mensal − (material + rateio + taxa)` |
+| **Valor por hora** | `sobra por cliente ÷ (encontros × horas por encontro)`, ou sobra total ÷ horas totais |
+| Preço mínimo | `(custos fixos + material de todos os clientes + meta de renda) ÷ (clientes × (1 − taxa))` |
+| Clientes necessários | quantos clientes, no preço atual, cobrem os custos e a meta |
+
+Quando o assistente adota uma premissa (por exemplo, "considerei o desenvolvimento como gasto mensal" ou "22 dias de trabalho por mês"), ela aparece na resposta.
+
+---
+
+## 4. Estrutura do projeto
+
+```
+├── api.py                # FastAPI: rota POST /chat e página do chat em GET /
+├── engine.py             # Motor: integração com o Gemini + validação + cálculo + textos
+├── frontend/
+│   ├── index.html        # Interface de chat
+│   ├── chat.js           # Envio das mensagens, estado da conversa e renderização segura
+│   └── style.css
+├── test_engine.py        # Testes unitários (78) e de integração com o Gemini (4, opcionais)
+├── avaliar_casos.py      # Avaliador dos 5 cenários de referência (gera relatorio_casos.md)
+├── chat_terminal.py      # Conversa com o assistente direto no terminal
+├── requirements.txt      # google-genai, python-dotenv, fastapi, uvicorn
+├── .env.example          # Modelo do arquivo de configuração
+└── .gitignore            # Inclui .env
+```
+
+---
+
+## 5. Instalação e execução local
+
+**Pré-requisitos:** Python 3.10 ou superior e uma chave gratuita da API do Gemini (https://aistudio.google.com/apikey).
 
 ```bash
+git clone https://github.com/otavio-pierin/Precifica.AI.git
+cd Precifica.AI
 pip install -r requirements.txt
 ```
 
-Crie o arquivo `.env` a partir do `.env.example` e coloque sua chave (gratuita em https://aistudio.google.com/apikey):
+Crie o arquivo `.env` na raiz do projeto com a sua chave:
 
 ```
 GEMINI_API_KEY=sua_chave_aqui
 ```
 
-> **Nunca** faça commit do `.env`. Ele já está no `.gitignore`.
+> No PowerShell, use `[IO.File]::WriteAllText("$PWD\.env", "GEMINI_API_KEY=sua_chave_aqui")` ou crie o arquivo pelo Bloco de Notas. **Nunca faça commit do `.env`.**
 
-Todas as variáveis opcionais (modelo, timeouts, tentativas) estão documentadas no `.env.example`. Os padrões do código já são os recomendados:
+Suba o servidor:
+
+```bash
+uvicorn api:app --reload
+```
+
+Depois, abra **http://localhost:8000**.
+
+---
+
+## 6. Configuração (.env)
+
+Só a `GEMINI_API_KEY` é obrigatória. As demais variáveis já têm os valores recomendados como padrão.
 
 | Variável | Padrão | Para que serve |
 |---|---|---|
-| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Modelo principal (15 req/min e 500 req/dia no plano gratuito) |
-| `GEMINI_MODELOS_RESERVA` | `gemini-3.8-flash` | Usados em ordem se o principal falhar |
-| `GEMINI_TIMEOUT` | `15` | Timeout de cada chamada (s) |
-| `GEMINI_PRAZO_TOTAL` | `25` | Tempo máximo somando todas as tentativas (s) |
+| `GEMINI_API_KEY` | — | Chave da API do Gemini (**obrigatória**) |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Modelo principal |
+| `GEMINI_MODELOS_RESERVA` | `gemini-3.8-flash` | Modelos tentados se o principal falhar (separados por vírgula; um espaço desativa) |
+| `GEMINI_THINKING` | `minimal` | Nível de raciocínio nos modelos Gemini 3+ (`minimal`, `low`, `medium`, `high`) |
+| `GEMINI_TIMEOUT` | `25` | Tempo máximo de cada chamada, em segundos |
+| `GEMINI_PRAZO_TOTAL` | `40` | Tempo máximo somando todas as tentativas, em segundos |
 | `GEMINI_TENTATIVAS` | `2` | Tentativas por modelo em erros 500/502/503 |
-| `GEMINI_THINKING` | `low` | Nível de raciocínio nos modelos Gemini 3+ |
+| `GEMINI_ESPERA` | `1.5` | Espera inicial entre tentativas (backoff), em segundos |
+| `PEDIR_CONFIRMACAO` | `1` | `1` mostra os dados e espera "sim" antes do primeiro cálculo; `0` calcula direto |
+| `DIAS_TRABALHO_MES` | `22` | Dias usados para converter "horas por dia" em horas por mês |
 
-### Estrutura
+Variáveis definidas no terminal têm prioridade sobre o `.env`, o que é útil para testes pontuais:
 
-```
-├── engine.py          # integração com a IA + motor financeiro + respostas
-├── test_engine.py     # 46 testes locais + 3 de integração (opcionais)
-├── requirements.txt   # google-genai, python-dotenv
-├── .env.example       # modelo do .env
-└── .gitignore
+```powershell
+$env:GEMINI_TIMEOUT = "40"   # vale só para esta janela do terminal
 ```
 
 ---
 
-## 2. Como o código funciona
+## 7. API HTTP
 
-```
-mensagem do usuário
-   │
-   ▼
-extrair_dados_com_ia()          IA: texto → JSON estruturado (nunca calcula)
-   │
-   ▼
-normalizar_extracao()           Python: valida tipos, corrige erros comuns da IA
-   │
-   ▼
-atualizar_estado()              Python: mescla com os dados já informados na sessão
-   │
-   ├─ informar_dados / corrigir_dado ─► calcular_metricas_financeiras()
-   └─ simular_preco ──────────────────► simular_novo_preco()
-   │
-   ▼
-formatar_explicacao_humana()    Python: texto simples para o chat
-```
+### `GET /`
+Devolve a interface de chat (`frontend/index.html`). Os arquivos estáticos ficam em `/static`.
 
-### As três intenções
+### `POST /chat`
 
-| Intenção | Exemplo de mensagem | O que acontece |
-|---|---|---|
-| `informar_dados` | "Cobro 60 na unha em gel, demoro 2h, gasto 15 de gel" | Adiciona os dados à sessão e calcula (se já houver o suficiente) |
-| `corrigir_dado` | "Na verdade o tecido custou 35" | Atualiza **só** o item corrigido, mantendo o resto |
-| `simular_preco` | "E se eu cobrar R$ 90?" | Compara o preço atual com o simulado, **sem** alterar o preço salvo |
-
-### Funções públicas
-
-| Função | Descrição |
-|---|---|
-| `processar_mensagem_usuario(mensagem, estado_atual=None)` | **Ponto de entrada do front-end.** Faz o fluxo inteiro. |
-| `calcular_metricas_financeiras(...)` | Função pura com todas as fórmulas. |
-| `simular_novo_preco(estado, novo_preco)` | Recalcula com outro preço e devolve a diferença de sobra. |
-| `atualizar_estado(estado_anterior, dados_novos)` | Mescla os dados novos na sessão (nunca altera o dict recebido). |
-| `formatar_explicacao_humana(metricas, intencao)` | Converte números em texto para o usuário. |
-
-### Regras de negócio importantes
-
-- **Dados obrigatórios para calcular:** `preco_cobrado`, `tempo_horas` e `valor_hora_desejado`. Se faltar algum, o módulo **pergunta** em vez de calcular com zero.
-- **Dados opcionais:** materiais, deslocamento e outros gastos assumem `0`. A taxa da maquininha assume **5%**.
-- **Campos `null` vindos da IA nunca apagam** dados já existentes na sessão.
-- **Materiais com o mesmo nome são substituídos**, e os novos são adicionados. Na correção, a busca é aproximada: "tecido" encontra "Tecido de algodão".
-- **"Sobra" já desconta a mão de obra.** Sobra negativa não significa necessariamente prejuízo em dinheiro. Significa que o usuário está ganhando **menos do que a hora desejada**. O texto da resposta explica isso.
-
----
-
-## 3. Fórmulas financeiras
-
-| Métrica | Fórmula |
-|---|---|
-| Custo direto (`custo_direto`) | Σ materiais + deslocamento + outros gastos |
-| Mão de obra (`custo_mao_obra`) | tempo_horas × valor_hora_desejado |
-| Custo total (`custo_total`) | custo direto + mão de obra |
-| Valor líquido (`valor_liquido`) | preço × (1 − taxa) |
-| Sobra (`sobra_liquida`) | valor líquido − custo total |
-| Margem (`margem_pct`) | sobra ÷ preço × 100 |
-| Preço mínimo (`preco_minimo`) | custo total ÷ (1 − taxa) |
-
-`taxa_maquininha_pct` é sempre uma **fração** (`0.05` = 5%). Se a IA devolver `5`, o código converte para `0.05`.
-
----
-
-## 4. Saída da função principal
-
-`processar_mensagem_usuario` **sempre** devolve um dicionário com as mesmas 9 chaves, inclusive em caso de erro. Todos os valores são serializáveis em JSON.
-
-| Chave | Tipo | Descrição | Mostrar ao usuário? |
-|---|---|---|---|
-| `sucesso` | `bool` | `False` apenas se a IA falhou ou um valor era inválido | Não (use para a UI) |
-| `intencao` | `str \| null` | `informar_dados`, `corrigir_dado`, `simular_preco` (ou `null` se falhou) | Não |
-| `dados_extraidos` | `dict \| null` | JSON normalizado vindo da IA | **Não** (debug) |
-| `estado` | `dict` | Dados acumulados da sessão | **Não**, mas **guarde** |
-| `metricas` | `dict \| null` | Preenchido em `informar_dados`/`corrigir_dado` quando há dados suficientes | Opcional (cards, gráficos) |
-| `simulacao` | `dict \| null` | Preenchido em `simular_preco` | Opcional (comparativo) |
-| `informacoes_faltantes` | `list[str]` | Campos obrigatórios que ainda faltam | Opcional (dicas) |
-| `resposta` | `str` | Texto pronto em **markdown simples** | **Sim, sempre** |
-| `erro` | `str \| null` | Detalhe técnico | **Não** (só log) |
-
-### Exemplo 1: cálculo completo (`informar_dados`)
-
-Mensagem: *"Cobro 60 reais para fazer unha em gel. Demoro 2 horas. Gasto 15 de gel e lixas, e 5 de transporte. Quero ganhar 15 reais por hora."*
+**Entrada:**
 
 ```json
 {
+  "mensagem": "Faço maquiagem social e cobro R$ 150.",
+  "estado": null
+}
+```
+
+Envie `estado: null` para começar uma conversa e, nas mensagens seguintes, o `estado` devolvido pela resposta anterior.
+
+**Saída:**
+
+```json
+{
+  "resposta": "Anotei: preço R$ 150,00.\n\nPara calcular, ainda preciso saber: ...",
+  "estado": { "...": "dados acumulados da conversa" },
   "sucesso": true,
   "intencao": "informar_dados",
-  "estado": {
-    "categoria_servico": "Beleza",
-    "nome_servico": "Unha em gel",
-    "preco_cobrado": 60.0,
-    "tempo_horas": 2.0,
-    "valor_hora_desejado": 15.0,
-    "materiais": [{ "item": "gel e lixas", "valor": 15.0 }],
-    "deslocamento": 5.0,
-    "outros_gastos": null,
-    "taxa_maquininha_pct": null
-  },
-  "metricas": {
-    "total_materiais": 15.0,
-    "deslocamento": 5.0,
-    "outros_gastos": 0.0,
-    "custo_direto": 20.0,
-    "tempo_horas": 2.0,
-    "valor_hora_desejado": 15.0,
-    "custo_mao_obra": 30.0,
-    "custo_total": 50.0,
-    "preco_cobrado": 60.0,
-    "taxa_maquininha_pct": 0.05,
-    "valor_taxa": 3.0,
-    "valor_liquido": 57.0,
-    "sobra_liquida": 7.0,
-    "margem_pct": 11.67,
-    "preco_minimo": 52.63,
-    "cobre_custos": true
-  },
+  "metricas": null,
   "simulacao": null,
-  "informacoes_faltantes": [],
-  "resposta": "Resumo do seu serviço (**Unha em gel**):\n- **Custos diretos ...",
-  "erro": null
+  "informacoes_faltantes": ["tempo_horas", "materiais", "deslocamento"]
 }
 ```
 
-O campo `resposta`, renderizado:
-
-> Resumo do seu serviço (**Unha em gel**):
-> - **Custos diretos (materiais + deslocamento + outros):** R$ 20,00
-> - **Sua mão de obra (2h a R$ 15/h):** R$ 30,00
-> - **Custo total do serviço:** R$ 50,00
->
-> Para o preço cobrado de **R$ 60,00** (considerando 5% de taxa do cartão):
-> - Você recebe líquido: **R$ 57,00**
-> - **Sobra real para o seu negócio:** R$ 7,00 (margem de 11,7%)
->
-> 💡 **Preço mínimo recomendado:** R$ 52,63 (para cobrir custos e mão de obra sem ter prejuízo).
->
-> Quer testar outro valor? Pergunte: 'E se eu cobrar R$ 70?'
-
-### Exemplo 2: simulação (`simular_preco`)
-
-Mensagem: *"E se eu cobrar R$ 90 em vez de R$ 60?"* (sessão com custo total de R$ 40)
-
-```json
-{
-  "sucesso": true,
-  "intencao": "simular_preco",
-  "metricas": null,
-  "simulacao": {
-    "preco_original": 60.0,
-    "preco_simulado": 90.0,
-    "sobra_original": 17.0,
-    "sobra_simulada": 45.5,
-    "diferenca_sobra": 28.5,
-    "metricas_original": { "...": "mesmas chaves de metricas" },
-    "metricas_simuladas": { "...": "mesmas chaves de metricas" }
-  },
-  "resposta": "🔎 Simulação: cobrando **R$ 90,00** em vez de **R$ 60,00**\n..."
-}
-```
-
-> 🔎 Simulação: cobrando **R$ 90,00** em vez de **R$ 60,00**
-> - Você recebe líquido: **R$ 85,50** (antes R$ 57,00)
-> - Sobra real: **R$ 45,50** (antes R$ 17,00) → R$ 28,50 a mais por serviço
-> - Margem: 50,6% (antes 28,3%)
->
-> 💡 Seus custos continuam os mesmos: o preço mínimo segue em R$ 42,11.
-
-Se a sessão ainda não tiver preço original, `preco_original`, `sobra_original`, `diferenca_sobra` e `metricas_original` vêm como `null`.
-
-### Exemplo 3: dados incompletos
-
-Mensagem: *"Cobro 80 na escova"*
-
-```json
-{
-  "sucesso": true,
-  "metricas": null,
-  "informacoes_faltantes": ["tempo_horas", "valor_hora_desejado"],
-  "resposta": "Anotei! Para calcular seu preço justo, ainda preciso saber:\n- quanto tempo leva para fazer (ex: 'demoro 2 horas')\n- quanto quer ganhar por hora de trabalho (ex: 'quero R$ 20 por hora')"
-}
-```
-
-### Exemplo 4: falha da IA
-
-```json
-{
-  "sucesso": false,
-  "intencao": null,
-  "estado": { "...": "estado ANTERIOR, intacto" },
-  "resposta": "Não consegui entender sua mensagem agora. Pode tentar de novo, de um jeito um pouco diferente?",
-  "erro": "Nenhum modelo respondeu a tempo. Tentativas: ..."
-}
-```
-
-Mensagem vazia retorna `sucesso: false` e `erro: "mensagem_vazia"`, **sem chamar a IA**.
-
----
-
-## 5. Como tratar no front-end
-
-### Regra de ouro
-
-```
-1. Envie (mensagem, estado)
-2. Mostre `resposta` no chat
-3. Guarde `estado` e devolva na próxima mensagem
-```
-
-O módulo **não guarda nada entre chamadas**. Quem mantém a conversa é quem chama. O `estado` é um JSON simples e pode ficar:
-
-- **no servidor**, associado à sessão do usuário (recomendado), ou
-- **no cliente**, enviado e recebido a cada requisição.
-
-Para começar um novo serviço do zero, envie `estado = null`.
-
-### Exemplo de API (FastAPI)
-
-> Não está no `requirements.txt`: `pip install fastapi uvicorn`
-
-```python
-# api.py
-import asyncio
-from fastapi import FastAPI
-from pydantic import BaseModel
-from engine import processar_mensagem_usuario
-
-app = FastAPI()
-
-class Entrada(BaseModel):
-    mensagem: str
-    estado: dict | None = None
-
-@app.post("/chat")
-async def chat(entrada: Entrada):
-    # A função é síncrona e pode levar alguns segundos (chamada à IA):
-    # rodar em thread evita travar o servidor para os outros usuários.
-    r = await asyncio.to_thread(processar_mensagem_usuario, entrada.mensagem, entrada.estado)
-    return {
-        "resposta": r["resposta"],
-        "estado": r["estado"],
-        "sucesso": r["sucesso"],
-        "intencao": r["intencao"],
-        "metricas": r["metricas"],
-        "simulacao": r["simulacao"],
-        "informacoes_faltantes": r["informacoes_faltantes"],
-        # "erro" e "dados_extraidos" ficam só no log do servidor
-    }
-```
-
-Rodar: `uvicorn api:app --reload`
-
-### Exemplo de cliente (JavaScript)
-
-```javascript
-let estado = null; // estado da conversa atual
-
-async function enviar(mensagem) {
-  mostrarCarregando(true);           // a IA pode levar de 2 a 25 segundos
-  bloquearBotaoEnviar(true);         // evita mensagens em paralelo
-  try {
-    const resp = await fetch("/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mensagem, estado }),
-    });
-    const r = await resp.json();
-    estado = r.estado;               // sempre atualize, mesmo com sucesso=false
-    adicionarBalao(renderizarMarkdown(r.resposta));
-    if (r.metricas) atualizarCards(r.metricas);
-    if (r.simulacao) mostrarComparativo(r.simulacao);
-  } catch (e) {
-    adicionarBalao("Sem conexão. Tente de novo em instantes.");
-  } finally {
-    mostrarCarregando(false);
-    bloquearBotaoEnviar(false);
-  }
-}
-```
-
-### Checklist de UI
-
-**Obrigatório**
-- [ ] **Renderizar `resposta` como markdown.** O texto usa `**negrito**`, listas com `- ` e quebras `\n`. Se não usar uma lib de markdown, troque pelo menos `\n` por `<br>` e `**x**` por `<strong>x</strong>`.
-- [ ] **Indicador de carregamento.** A chamada leva normalmente de 2 a 5 s. No pior caso, com o Google instável, até ~25 s.
-- [ ] **Bloquear envio durante o processamento.** Duas mensagens simultâneas na mesma sessão podem sobrescrever o estado.
-- [ ] **Sempre substituir o `estado` local pelo retornado**, inclusive com `sucesso: false` (nesse caso vem o anterior, intacto).
-- [ ] **Nunca exibir `erro` nem `dados_extraidos`** ao usuário. São só para log e depuração.
-
-**Recomendado**
-- [ ] **Botão "Novo serviço"**, que faz `estado = null`.
-- [ ] **Botões rápidos de simulação** ("E se eu cobrar R$ 70?") após um cálculo. Basta enviar o texto como mensagem.
-- [ ] **Destaque visual quando `metricas.cobre_custos === false`** (ex.: card vermelho). O texto já alerta, mas o visual ajuda.
-- [ ] **Dicas a partir de `informacoes_faltantes`**, por exemplo chips clicáveis "⏱️ Informar tempo" e "💰 Informar valor da hora".
-
-### Usando os números diretamente
-
-Se quiser montar cards ou gráficos em vez de usar só o texto:
-
-- Valores monetários já vêm **arredondados em 2 casas** (float). Formate no front:
-  ```javascript
-  const brl = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
-  brl.format(r.metricas.sobra_liquida); // "R$ 7,00"
-  ```
-- `taxa_maquininha_pct` é **fração**: exiba `taxa * 100` + `%`.
-- `margem_pct` já está em **porcentagem** (`11.67` = 11,67%) e **pode ser `null`** quando o preço é zero.
-- `sobra_liquida` e `diferenca_sobra` **podem ser negativos**.
-- **Não refaça as contas no front.** Use sempre os valores do back-end, que são a fonte única da verdade.
-
-### Limite de uso da IA (plano gratuito)
-
-Cada mensagem do usuário consome **1 requisição** ao Gemini. Com os padrões atuais, o modelo principal permite cerca de **15 mensagens por minuto** e **500 por dia** para **toda a aplicação** (o limite é da chave, não por usuário). Se o limite for atingido, o módulo tenta o modelo reserva automaticamente e, se nada responder, devolve a mensagem amigável de erro.
-
----
-
-## 6. Resiliência da chamada à IA
-
-| Erro do Google | Significado | Comportamento |
-|---|---|---|
-| 500 / 502 / 503 | Sobrecarga momentânea | Espera (backoff) e tenta de novo no mesmo modelo |
-| 404 | Modelo indisponível para a conta | Pula direto para o próximo modelo |
-| 429 | Cota do modelo esgotada | Pula direto para o próximo modelo |
-| 504 | Modelo lento demais | Pula direto para o próximo modelo |
-| 400 / 401 / 403 | Chave ou requisição inválida | Falha na hora |
-| JSON inválido | IA respondeu fora do formato | Tenta de novo |
-
-Tudo isso respeita o `GEMINI_PRAZO_TOTAL` (25 s). Passado esse tempo, o usuário recebe a resposta amigável em vez de ficar esperando.
-
-**Sobre a temperatura:** nos modelos Gemini 1.x/2.x usamos `temperature=0.0`. Nos modelos Gemini 3+ mantemos a temperatura padrão e raciocínio `low`, porque o Google recomenda isso e valores baixos causaram lentidão (erro 504) nos testes. O determinismo dos **números** não depende disso: toda conta é feita em Python e a saída da IA é validada antes de qualquer cálculo.
-
----
-
-## 7. Testes
+**Testando pelo terminal** (troque a URL por `http://localhost:8000` para testar localmente):
 
 ```bash
-# Testes locais (não usam a API nem consomem cota)
+# Linux / macOS / Git Bash
+curl -X POST https://precifica-ai.onrender.com/chat \
+  -H "Content-Type: application/json" \
+  -d '{"mensagem": "Faço maquiagem social e cobro R$ 150.", "estado": null}'
+```
+
+```powershell
+# PowerShell: conversa em duas mensagens, reaproveitando o estado
+$url = "https://precifica-ai.onrender.com/chat"
+$r1 = Invoke-RestMethod $url -Method Post -ContentType "application/json; charset=utf-8" `
+      -Body (@{ mensagem = "Cobro R$ 80 na maquiagem, gasto R$ 15 de material, R$ 10 de Uber, levo 2h e recebo no Pix"; estado = $null } | ConvertTo-Json)
+$r1.resposta
+
+$r2 = Invoke-RestMethod $url -Method Post -ContentType "application/json; charset=utf-8" `
+      -Body (@{ mensagem = "sim"; estado = $r1.estado } | ConvertTo-Json -Depth 10)
+$r2.resposta
+```
+
+---
+
+## 8. Saída do motor (`engine.py`)
+
+A função principal é `processar_mensagem_usuario(mensagem, estado_atual=None)`. Ela **sempre** devolve as mesmas chaves, inclusive em caso de erro:
+
+| Chave | Descrição | Mostrar ao usuário? |
+|---|---|---|
+| `sucesso` | `False` só se a IA falhou ou um valor era inválido | Não |
+| `intencao` | `informar_dados`, `corrigir_dado`, `simular_preco`, `confirmar` ou `null` | Não |
+| `dados_extraidos` | JSON normalizado vindo da IA | Não (depuração) |
+| `estado` | Dados acumulados da conversa | Não, mas **guarde e reenvie** |
+| `metricas` | Números do cálculo (quando houve cálculo) | Opcional |
+| `simulacao` | Comparação de cenários (em `simular_preco`) | Opcional |
+| `informacoes_faltantes` | Dados essenciais que ainda faltam | Opcional |
+| `resposta` | Texto pronto, em markdown simples | **Sim, sempre** |
+| `erro` | Detalhe técnico | Não (só log) |
+
+Principais campos de `metricas`:
+
+- **Por serviço:** `total_materiais`, `materiais_detalhe`, `deslocamento`, `valor_taxa`, `custos_fixos_rateados`, `custos_totais`, `sobra_real`, `valor_hora_real`, `preco_minimo`, `tem_meta`, `margem_pct`.
+- **Recorrente:** `custos_fixos_mensais`, `rateio_por_cliente`, `custo_por_cliente_mensal`, `custos_por_cliente`, `sobra_por_cliente`, `sobra_real` (total do mês), `valor_hora_real`, `preco_minimo`, `preco_minimo_periodo`, `clientes_necessarios`, `falta_para_meta`, `premissas`.
+
+> Por compatibilidade, `custo_total` e `sobra_liquida` continuam existindo no conceito antigo, que desconta a meta de ganho. Para o resultado exibido ao usuário, use `custos_totais`, `sobra_real` e `valor_hora_real`.
+
+O `estado` é um JSON simples. Além dos dados informados, ele guarda três campos de controle: `estimados` (campos que o usuário estimou), `aguardando_confirmacao` e `confirmado`.
+
+---
+
+## 9. Front-end
+
+A interface (`frontend/`) é HTML, CSS e JavaScript puro, com visual de aplicativo de mensagens:
+
+- **Contrato com a API:** envia `{ mensagem, estado }` para `/chat`, mostra `resposta` e guarda o `estado` devolvido, inclusive quando `sucesso` é `false`.
+- **Conversa salva no navegador:** a conversa fica no `sessionStorage`, então sobrevive a um F5, e o botão **Nova conversa** a reinicia.
+- **Renderização segura:** o texto da resposta é montado sem `innerHTML` (negrito, listas e parágrafos), o que evita injeção de código.
+- **Uma mensagem por vez:** o envio fica bloqueado enquanto a resposta não chega, e respostas atrasadas de uma conversa já reiniciada são descartadas.
+
+---
+
+## 10. Testes pelo terminal
+
+### Testes unitários (não usam a API nem gastam cota)
+
+```bash
 python -m unittest -v test_engine
 ```
 
-Os testes locais substituem a IA por um extrator falso e cobrem:
-
-- os 3 cenários obrigatórios (manicure, costura, artesanato);
+São 78 testes locais. Eles cobrem:
 - o motor financeiro;
-- a normalização da saída da IA;
-- a mescla de estado;
-- a robustez do contrato;
-- a resiliência a erros da API.
+- a validação das respostas da IA;
+- a mescla de estado e a confirmação;
+- os dois modelos de cobrança;
+- a resiliência a falhas da API;
+- os 5 cenários do gabarito.
+
+### Testes de integração com o Gemini real (gastam 4 requisições)
 
 ```powershell
-# Testes de integração com o Gemini real (gastam 3 requisições da cota)
 $env:RUN_INTEGRATION = "1"
 python -m unittest -v test_engine.TestIntegracaoGemini
 ```
 
-Diagnóstico rápido de latência e de qual modelo respondeu:
+### Avaliador dos 5 cenários de referência
 
-```powershell
-python -c "import logging,time,engine; logging.basicConfig(level=logging.WARNING); t=time.time(); r=engine.processar_mensagem_usuario('E se eu cobrar 90?', {'preco_cobrado':60,'tempo_horas':2,'valor_hora_desejado':10,'materiais':[]}); print(round(time.time()-t,1),'s |', r['sucesso'], r['intencao'])"
+Compara as respostas do assistente com um gabarito calculado à mão: caminho feliz, comparação de preços, pacote × unidade, dados inválidos e plano mensal. Gera o `relatorio_casos.md` só com o que não bateu.
+
+```bash
+python avaliar_casos.py                      # offline: extração simulada, sem gastar cota
+python avaliar_casos.py --ia                 # com o Gemini real (~35 requisições)
+python avaliar_casos.py --ia --cenarios 1,3  # só os cenários escolhidos
+```
+
+### Conversa interativa no terminal
+
+```bash
+python chat_terminal.py           # digite "nova" para recomeçar e "sair" para encerrar
+python chat_terminal.py --debug   # mostra também intenção, dados extraídos e estado
+```
+
+### Diagnóstico rápido da API (tempo e modelo que respondeu)
+
+```bash
+python -c "import logging,time,engine; logging.basicConfig(level=logging.WARNING); t=time.time(); r=engine.processar_mensagem_usuario('Cobro 60 na unha', None); print(round(time.time()-t,1),'s |', r['sucesso'], r['erro'])"
 ```
 
 ---
 
-## 8. Limitações conhecidas
+## 11. Deploy no Render
 
-- **Um serviço por sessão.** O estado guarda um serviço de cada vez. Para precificar outro, inicie um novo estado.
-- **Remover itens não é suportado.** "Tira o transporte" não zera o deslocamento. O usuário pode corrigir para zero ("o transporte foi 0").
-- **A extração depende da IA.** Frases muito ambíguas podem ser mal interpretadas. Os números calculados são sempre corretos para os dados extraídos, mas vale exibir o resumo para o usuário conferir.
-- **Sem persistência.** O módulo não salva nada. Guardar histórico ou sessões é responsabilidade da camada que o chama.
+A aplicação está publicada como **Web Service** no Render: https://precifica-ai.onrender.com
+
+| Configuração | Valor |
+|---|---|
+| Runtime | Python |
+| Build Command | `pip install -r requirements.txt` |
+| Start Command | `uvicorn api:app --host 0.0.0.0 --port $PORT` |
+| Variáveis de ambiente | `GEMINI_API_KEY` (obrigatória) e, se quiser, as outras da seção 6 |
+
+Configure a chave em **Environment** no painel do Render, nunca no código. No plano gratuito, o serviço "dorme" depois de um tempo sem acessos, e o primeiro acesso seguinte pode levar até cerca de um minuto para responder.
+
+---
+
+## 12. Limites da API e solução de problemas
+
+No plano gratuito, cada modelo tem limites de requisições por minuto e por dia, que podem ser consultados no AI Studio. Cada mensagem do chat consome uma requisição. O "sim" de confirmação não consome nenhuma.
+
+| Sintoma no log | Causa | O que fazer |
+|---|---|---|
+| `429` | Cota do modelo esgotada | Esperar a cota reiniciar ou trocar a `GEMINI_API_KEY` por uma chave de outra conta |
+| `504` | Modelo lento (o prazo estourou) | Tentar mais tarde ou aumentar `GEMINI_TIMEOUT` |
+| `503` | Sobrecarga do Google | Tentar mais tarde (o código já repete e troca de modelo) |
+| `400 ... Thinking level ... not supported` | O modelo não aceita o nível de raciocínio | O engine passa sozinho a usar `low` nesse modelo |
+| `GEMINI_API_KEY não configurada` | `.env` ausente, mal escrito ou salvo com BOM | Recriar o `.env` (o engine já tolera BOM) |
+| Aviso `LF will be replaced by CRLF` no Git | Quebra de linha no Windows | Inofensivo |
+
+Quando nenhum modelo responde dentro do prazo, o usuário recebe uma mensagem amigável e a conversa é preservada.
+
+---
+
+## 13. Uso responsável da IA
+
+- **Contas fora da IA:** a IA só interpreta texto, e todas as contas são feitas em código testado.
+- **Supervisão humana:** o usuário confirma os dados antes do cálculo e pode corrigir qualquer valor.
+- **Transparência:** premissas e estimativas são sempre exibidas, e nada é preenchido sem aviso.
+- **Privacidade:** não pedimos dados pessoais, o servidor não armazena conversas (o estado fica no navegador) e a chave da API fica fora do código.
+- **Eficiência:** usamos o modelo mais leve, raciocínio mínimo, no máximo uma chamada por mensagem e confirmações sem chamada à IA.
+- **Plano gratuito:** nos termos do plano gratuito do Gemini, o Google pode usar o conteúdo enviado para melhorar seus produtos. Para uso em produção, recomenda-se um plano pago com garantia de não retenção.
+
+---
+
+## 14. Limitações conhecidas
+
+- **Um serviço por conversa:** para precificar outro serviço, use **Nova conversa**.
+- **Remoção de itens:** não há como remover um item, mas dá para corrigir o valor para zero ("o transporte foi 0").
+- **Depende da IA para interpretar:** frases muito ambíguas podem ser mal interpretadas. A etapa de confirmação existe para o usuário conferir antes do cálculo.
+- **Sem histórico entre sessões:** não há login nem histórico salvo de uma visita para outra.
+- **Plano gratuito:** o Render e a API do Gemini no plano gratuito têm limites de uso e podem ficar lentos em horários de pico.
